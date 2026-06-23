@@ -7,7 +7,10 @@
 
 void temp_sensor_init(void);
 void temp_sensor_task(void *pvParameters);
-esp_err_t temp_sensor_read(float *temperature, float *humidity);
 
-float temp_sensor_get_temperature(void); 
-float temp_sensor_get_humidity(void);    
+esp_err_t temp_sensor_read(uint16_t *temp_tenths, uint8_t *temp_negative,
+                           uint16_t *hum_tenths);
+
+uint16_t temp_sensor_get_temp_tenths(void);
+uint8_t  temp_sensor_get_temp_negative(void);
+uint16_t temp_sensor_get_hum_tenths(void);

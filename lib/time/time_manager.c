@@ -10,12 +10,14 @@
 #include "esp_sntp.h"
 
 #include "wifi_manager.h"
+#include "app_state.h"
 
 static const char *TAG = "TIME_MGR";
 
-#define TIME_LOG_PERIOD_MS   10000
-#define TIME_SYNC_TIMEOUT_MS 15000
-#define TIME_YEAR_VALID      (2020 - 1900)
+#define TIME_UPDATE_PERIOD_MS 1000
+#define TIME_LOG_PERIOD_MS    10000
+#define TIME_SYNC_TIMEOUT_MS  15000
+#define TIME_YEAR_VALID       (2020 - 1900)
 
 static bool s_synced = false;
 
@@ -85,12 +87,29 @@ void time_task(void *pvParameters)
              time_get_date_string(), time_get_hour(),
              time_get_minute(), time_get_second());
 
+    uint32_t since_log_ms = 0;
     for (;;) {
         struct tm t = time_now();
-        ESP_LOGI(TAG, "Data: %02d-%02d-%04d  Ora: %02d:%02d:%02d",
-                 t.tm_mday, t.tm_mon + 1, t.tm_year + 1900,
-                 t.tm_hour, t.tm_min, t.tm_sec);
-        vTaskDelay(pdMS_TO_TICKS(TIME_LOG_PERIOD_MS));
+
+        app_time_t snap = {
+            .hour = (uint8_t)t.tm_hour,
+            .minute = (uint8_t)t.tm_min,
+            .second = (uint8_t)t.tm_sec,
+            .day = (uint8_t)t.tm_mday,
+            .month = (uint8_t)(t.tm_mon + 1),
+            .year = (uint16_t)(t.tm_year + 1900),
+            .synced = s_synced ? 1 : 0,
+        };
+        app_state_set_time(&snap);
+
+        if (since_log_ms >= TIME_LOG_PERIOD_MS) {
+            since_log_ms = 0;
+            ESP_LOGI(TAG, "Data: %02d-%02d-%04d  Ora: %02d:%02d:%02d",
+                     t.tm_mday, t.tm_mon + 1, t.tm_year + 1900,
+                     t.tm_hour, t.tm_min, t.tm_sec);
+        }
+        since_log_ms += TIME_UPDATE_PERIOD_MS;
+        vTaskDelay(pdMS_TO_TICKS(TIME_UPDATE_PERIOD_MS));
     }
 }
 
