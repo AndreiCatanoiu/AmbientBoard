@@ -1,0 +1,247 @@
+#include "inbox.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+
+#include "esp_log.h"
+#include "esp_http_client.h"
+
+#include "mqtt_ca_pem.h"
+#include "remote_secret.h"
+#include "wifi_manager.h"
+
+/* Copiaza ca lib/inbox/inbox.c — logica de pull e doar locala. */
+
+static const char *TAG = "INBOX";
+
+typedef struct {
+    char from[INBOX_FROM_LEN];
+    char line[INBOX_LINE_LEN];
+} inbox_item_t;
+
+static SemaphoreHandle_t s_lock = NULL;
+static volatile uint32_t s_version = 0;
+static inbox_item_t s_items[INBOX_ITEM_MAX];
+static uint8_t s_count = 0;
+static TaskHandle_t s_task = NULL;
+
+static void bump(void)
+{
+    s_version++;
+}
+
+static bool json_field(const char *key, const char *json, char *out, size_t out_len)
+{
+    char needle[24];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (p == NULL) {
+        return false;
+    }
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == ':') {
+        p++;
+    }
+    if (*p != '"') {
+        return false;
+    }
+    p++;
+    size_t i = 0;
+    while (*p != '\0' && *p != '"' && i < out_len - 1) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+static bool http_body(const char *url, char *body, size_t body_len)
+{
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .cert_pem = MQTT_CA_CERT_PEM,
+        .timeout_ms = 15000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        return false;
+    }
+
+    bool ok = false;
+    if (esp_http_client_open(client, 0) == ESP_OK) {
+        int total = esp_http_client_fetch_headers(client);
+        if (total < 0) {
+            total = (int)body_len - 1;
+        }
+        if (total > (int)body_len - 1) {
+            total = (int)body_len - 1;
+        }
+        int read = esp_http_client_read(client, body, total);
+        if (read > 0) {
+            body[read] = '\0';
+            ok = true;
+        }
+    }
+    esp_http_client_cleanup(client);
+    return ok;
+}
+
+static bool parse_payload(const char *body)
+{
+    const char *arr = strchr(body, '[');
+    if (arr == NULL) {
+        return false;
+    }
+    arr++;
+
+    inbox_item_t parsed[INBOX_ITEM_MAX];
+    uint8_t count = 0;
+
+    const char *obj = arr;
+    while (count < INBOX_ITEM_MAX) {
+        obj = strchr(obj, '{');
+        if (obj == NULL) {
+            break;
+        }
+        const char *obj_end = strchr(obj, '}');
+        if (obj_end == NULL) {
+            break;
+        }
+
+        char chunk[192];
+        size_t chunk_len = (size_t)(obj_end - obj + 1);
+        if (chunk_len >= sizeof(chunk)) {
+            chunk_len = sizeof(chunk) - 1;
+        }
+        memcpy(chunk, obj, chunk_len);
+        chunk[chunk_len] = '\0';
+
+        inbox_item_t *slot = &parsed[count];
+        if (json_field("sender", chunk, slot->from, sizeof(slot->from)) &&
+            json_field("text", chunk, slot->line, sizeof(slot->line))) {
+            count++;
+        }
+
+        obj = obj_end + 1;
+        if (*obj == ']') {
+            break;
+        }
+    }
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+    }
+    s_count = count;
+    memcpy(s_items, parsed, count * sizeof(inbox_item_t));
+    if (s_lock != NULL) {
+        xSemaphoreGive(s_lock);
+    }
+    bump();
+    return true;
+}
+
+static bool pull_now(void)
+{
+    if (!wifi_is_connected()) {
+        return false;
+    }
+
+    char url[160];
+    if (rsec_pull_url(url, sizeof(url)) == 0) {
+        return false;
+    }
+
+    char *body = malloc(2048);
+    if (body == NULL) {
+        return false;
+    }
+
+    bool ok = http_body(url, body, 2048);
+    if (ok) {
+        ok = parse_payload(body);
+        ESP_LOGD(TAG, "Actualizat: %u intrari", s_count);
+    }
+    free(body);
+    return ok;
+}
+
+static void pull_task(void *arg)
+{
+    (void) arg;
+    pull_now();
+    s_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void schedule_pull(void)
+{
+    if (!wifi_is_connected() || s_task != NULL) {
+        return;
+    }
+    xTaskCreate(pull_task, "inbox_pull", 6144, NULL, 4, &s_task);
+}
+
+void inbox_init(void)
+{
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateMutex();
+    }
+    schedule_pull();
+}
+
+void inbox_refresh(void)
+{
+    schedule_pull();
+}
+
+uint8_t inbox_count(void)
+{
+    if (s_lock == NULL) {
+        return s_count;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uint8_t n = s_count;
+    xSemaphoreGive(s_lock);
+    return n;
+}
+
+void inbox_get(uint8_t index, char *from, char *line, size_t len)
+{
+    if (len == 0) {
+        return;
+    }
+
+    if (s_lock != NULL) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+    }
+
+    if (index >= s_count) {
+        if (from) {
+            from[0] = '\0';
+        }
+        if (line) {
+            line[0] = '\0';
+        }
+    } else {
+        if (from != NULL) {
+            snprintf(from, len, "%s", s_items[index].from);
+        }
+        if (line != NULL) {
+            snprintf(line, len, "%s", s_items[index].line);
+        }
+    }
+
+    if (s_lock != NULL) {
+        xSemaphoreGive(s_lock);
+    }
+}
+
+uint32_t inbox_version(void)
+{
+    return s_version;
+}
