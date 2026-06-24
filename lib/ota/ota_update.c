@@ -20,6 +20,8 @@
 #define CURRENT_FW_VERSION "v0.0.0"
 #endif
 
+#define OTA_MIN_IMAGE_BYTES  400000
+
 static const char *TAG = "OTA";
 
 static volatile ota_state_t s_state = OTA_STATE_IDLE;
@@ -144,6 +146,42 @@ static bool http_get_body(const char *url, char *body, size_t body_len)
     return ok;
 }
 
+static bool ota_image_size_ok(const char *url)
+{
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 15000,
+    };
+
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (client == NULL) {
+        return false;
+    }
+
+    esp_http_client_set_method(client, HTTP_METHOD_HEAD);
+    esp_err_t err = esp_http_client_perform(client);
+    int len = esp_http_client_get_content_length(client);
+    esp_http_client_cleanup(client);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "HEAD esuat, continui fara verificare marime");
+        return true;
+    }
+
+    if (len < 0) {
+        ESP_LOGW(TAG, "Marime necunoscuta, continui");
+        return true;
+    }
+
+    ESP_LOGI(TAG, "Marime bin OTA: %d bytes", len);
+    if (len < OTA_MIN_IMAGE_BYTES) {
+        ESP_LOGE(TAG, "Bin prea mic (%d) — refuz update", len);
+        return false;
+    }
+    return true;
+}
+
 static bool fetch_latest_manifest(void)
 {
     char base[96];
@@ -225,6 +263,13 @@ static void ota_task(void *arg)
 
     char url[160];
     snprintf(url, sizeof(url), "%s/%s", base, s_latest_bin);
+
+    if (!ota_image_size_ok(url)) {
+        set_status(OTA_STATE_FAILED, "Bin invalid (prea mic)");
+        s_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
 
     set_status(OTA_STATE_CHECKING, "Pornesc update...");
     ESP_LOGI(TAG, "Descarc %s", url);

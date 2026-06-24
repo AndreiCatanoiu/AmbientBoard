@@ -12,13 +12,14 @@
 static const char *TAG = "TEMP_SENSOR";
 
 #define TEMP_SENSOR_PERIOD_MS   3000
-#define DHT_START_LOW_US        1800
-#define DHT_START_RELEASE_US    40
-#define DHT_RESPONSE_TIMEOUT_US 100
-#define DHT_BIT_TIMEOUT_US      100
+#define TEMP_SENSOR_RETRIES     3
+#define TEMP_SENSOR_RETRY_MS    30
+#define DHT_START_LOW_US        1100
+#define DHT_START_RELEASE_US    30
+#define DHT_RESPONSE_TIMEOUT_US 300
+#define DHT_BIT_TIMEOUT_US      120
 #define DHT_BIT1_MIN_US         40
 
-#define CCOUNT_MHZ              240
 #define TEMP_FILTER_SAMPLES     5
 #define TEMP_MIN_TENTHS         0
 #define TEMP_MAX_TENTHS         600
@@ -41,16 +42,23 @@ static uint32_t IRAM_ATTR cpu_ccount(void)
     return c;
 }
 
+static uint32_t IRAM_ATTR ccount_ticks_per_us(void)
+{
+    uint32_t t = esp_rom_get_cpu_ticks_per_us();
+    return (t > 0) ? t : 160;
+}
+
 static int IRAM_ATTR dht_wait_level_us(int level, int timeout_us)
 {
+    uint32_t tpu = ccount_ticks_per_us();
     uint32_t start = cpu_ccount();
-    uint32_t limit = (uint32_t)timeout_us * CCOUNT_MHZ;
+    uint32_t limit = (uint32_t)timeout_us * tpu;
     while (gpio_get_level(TEMP_SENSOR_GPIO) != level) {
         if ((cpu_ccount() - start) > limit) {
             return -1;
         }
     }
-    return (int)((cpu_ccount() - start) / CCOUNT_MHZ);
+    return (int)((cpu_ccount() - start) / tpu);
 }
 
 static uint16_t median_u16(uint16_t *v, uint8_t n)
@@ -189,6 +197,22 @@ esp_err_t temp_sensor_read(uint16_t *temp_tenths, uint8_t *temp_negative,
     return ESP_OK;
 }
 
+static esp_err_t temp_sensor_read_retry(uint16_t *temp_tenths, uint8_t *temp_negative,
+                                        uint16_t *hum_tenths)
+{
+    esp_err_t err = ESP_ERR_TIMEOUT;
+    for (uint8_t attempt = 0; attempt < TEMP_SENSOR_RETRIES; attempt++) {
+        if (attempt > 0) {
+            vTaskDelay(pdMS_TO_TICKS(TEMP_SENSOR_RETRY_MS));
+        }
+        err = temp_sensor_read(temp_tenths, temp_negative, hum_tenths);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+    }
+    return err;
+}
+
 void temp_sensor_init(void)
 {
     gpio_config_t io_conf = {
@@ -200,7 +224,8 @@ void temp_sensor_init(void)
     };
     gpio_config(&io_conf);
     vTaskDelay(pdMS_TO_TICKS(2000));
-    ESP_LOGI(TAG, "DHT22 pe GPIO%d", TEMP_SENSOR_GPIO);
+    ESP_LOGI(TAG, "DHT22 pe GPIO%d, %u ticks/us",
+             TEMP_SENSOR_GPIO, (unsigned)ccount_ticks_per_us());
 }
 
 void temp_sensor_task(void *pvParameters)
@@ -212,7 +237,7 @@ void temp_sensor_task(void *pvParameters)
         uint16_t raw_temp = 0;
         uint8_t raw_neg = 0;
         uint16_t raw_hum = 0;
-        esp_err_t err = temp_sensor_read(&raw_temp, &raw_neg, &raw_hum);
+        esp_err_t err = temp_sensor_read_retry(&raw_temp, &raw_neg, &raw_hum);
 
         app_sensor_t snap = {0};
         if (err == ESP_OK) {
@@ -244,12 +269,16 @@ void temp_sensor_task(void *pvParameters)
                 snap.hum_tenths = s_hum_tenths;
                 snap.valid = (s_hist_len > 0);
             }
-        } else {
+        } else if (s_hist_len > 0) {
             snap.temp_tenths = s_temp_tenths;
             snap.temp_negative = s_temp_negative;
             snap.hum_tenths = s_hum_tenths;
-            snap.valid = (s_hist_len > 0);
-            ESP_LOGW(TAG, "Citire esuata: %s", esp_err_to_name(err));
+            snap.valid = 1;
+            ESP_LOGD(TAG, "Citire esuata, pastrez ultima valoare");
+        } else {
+            snap.valid = 0;
+            ESP_LOGW(TAG, "Citire esuata: %s (linie=%d)",
+                     esp_err_to_name(err), gpio_get_level(TEMP_SENSOR_GPIO));
         }
         app_state_set_sensor(&snap);
 
