@@ -15,6 +15,7 @@ static const char *NS = "amb";
 #define KEY_CAL_CNT  "cal_cnt"
 #define KEY_CAL_BLOB "cal_blob"
 #define KEY_LED      "led_rgb"
+#define KEY_MQTT_NAME "mqtt_name"
 
 void settings_init(void)
 {
@@ -94,6 +95,59 @@ void settings_set_wifi(const char *ssid, const char *pass)
         nvs_commit(h);
         nvs_close(h);
         ESP_LOGI(TAG, "Credentiale WiFi salvate (SSID: %s)", ssid);
+    }
+}
+
+static bool mqtt_name_char_ok(char c)
+{
+    if (c == '/' || c == '#' || c == '+' || (unsigned char)c < 32) {
+        return false;
+    }
+    return true;
+}
+
+bool settings_get_mqtt_name(char *out, size_t len)
+{
+    if (out == NULL || len == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t n = len;
+    esp_err_t err = nvs_get_str(h, KEY_MQTT_NAME, out, &n);
+    nvs_close(h);
+    return (err == ESP_OK && out[0] != '\0');
+}
+
+void settings_set_mqtt_name(const char *name)
+{
+    if (name == NULL) {
+        return;
+    }
+    while (*name == ' ') {
+        name++;
+    }
+    if (name[0] == '\0') {
+        return;
+    }
+    for (const char *p = name; *p; p++) {
+        if (!mqtt_name_char_ok(*p)) {
+            return;
+        }
+    }
+    if (strlen(name) >= MQTT_DEVICE_NAME_LEN) {
+        return;
+    }
+
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_str(h, KEY_MQTT_NAME, name);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "Nume MQTT salvat: %s", name);
     }
 }
 

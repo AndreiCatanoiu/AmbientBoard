@@ -1,10 +1,13 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 
 #define CAL_TEXT_LEN   32
 #define CAL_MAX_EVENTS 32
+
+#define MQTT_DEVICE_NAME_LEN 20
 
 typedef struct {
     uint16_t year;
@@ -23,6 +26,10 @@ void     settings_set_led(uint32_t rgb);
 
 bool settings_get_wifi(char *ssid, char *pass);
 void settings_set_wifi(const char *ssid, const char *pass);
+
+/* Numele afisat pe topicul MQTT ambientboard/<nume>. */
+bool settings_get_mqtt_name(char *out, size_t len);
+void settings_set_mqtt_name(const char *name);
 
 uint8_t settings_calendar_count(void);
 uint8_t settings_calendar_load(calendar_event_t *events, uint8_t max);

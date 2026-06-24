@@ -14,7 +14,6 @@ static const char *WEEKDAYS[] = {
 static lv_obj_t *s_time_lbl;
 static lv_obj_t *s_date_lbl;
 static lv_obj_t *s_weekday_lbl;
-static lv_obj_t *s_temp_lbl;
 static lv_timer_t *s_timer;
 
 static uint8_t weekday_of(uint16_t y, uint8_t m, uint8_t d)
@@ -32,8 +31,6 @@ static void update_cb(lv_timer_t *timer)
 
     app_time_t t;
     app_state_get_time(&t);
-    app_sensor_t s;
-    app_state_get_sensor(&s);
 
     lv_label_set_text_fmt(s_time_lbl, "%02u:%02u", t.hour, t.minute);
 
@@ -43,15 +40,6 @@ static void update_cb(lv_timer_t *timer)
     } else {
         lv_label_set_text(s_date_lbl, "--.--.----");
         lv_label_set_text(s_weekday_lbl, "Sincronizare...");
-    }
-
-    if (s.valid) {
-        lv_label_set_text_fmt(s_temp_lbl, "%s%u.%u C  |  %u.%u%%",
-                              s.temp_negative ? "-" : "",
-                              s.temp_tenths / 10, s.temp_tenths % 10,
-                              s.hum_tenths / 10, s.hum_tenths % 10);
-    } else {
-        lv_label_set_text(s_temp_lbl, "--");
     }
 }
 
@@ -109,11 +97,6 @@ lv_obj_t *ui_home_create(void)
     lv_obj_set_style_text_font(s_date_lbl, &lv_font_montserrat_16, 0);
     lv_label_set_text(s_date_lbl, "--.--.----");
     lv_obj_align(s_date_lbl, LV_ALIGN_TOP_MID, 0, 102);
-
-    s_temp_lbl = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_temp_lbl, &lv_font_montserrat_16, 0);
-    lv_label_set_text(s_temp_lbl, "--");
-    lv_obj_align(s_temp_lbl, LV_ALIGN_TOP_MID, 0, 126);
 
     lv_obj_t *grid = lv_obj_create(scr);
     lv_obj_remove_style_all(grid);

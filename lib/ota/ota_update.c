@@ -25,6 +25,7 @@ static const char *TAG = "OTA";
 static volatile ota_state_t s_state = OTA_STATE_IDLE;
 static char s_status[64] = "Inactiv";
 static char s_latest_version[16] = "--";
+static char s_latest_bin[64] = "";
 static volatile bool s_update_available = false;
 static TaskHandle_t s_task = NULL;
 static SemaphoreHandle_t s_lock = NULL;
@@ -67,27 +68,52 @@ static bool version_is_newer(const char *latest, const char *current)
     return lpa > cpa;
 }
 
-static void trim_version_text(char *text, size_t len)
+static bool json_extract_string(const char *json, const char *key, char *out, size_t out_len)
 {
-    if (len == 0) {
-        return;
-    }
-    size_t n = 0;
-    while (n < len && text[n] != '\0' &&
-           text[n] != '\r' && text[n] != '\n' && !isspace((unsigned char)text[n])) {
-        n++;
-    }
-    text[n] = '\0';
-}
-
-static bool fetch_latest_version(void)
-{
-    char url[96];
-    if (remote_build_version_url(url, sizeof(url)) == 0) {
+    if (json == NULL || key == NULL || out == NULL || out_len == 0) {
         return false;
     }
 
-    char body[32] = {0};
+    char needle[24];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (p == NULL) {
+        return false;
+    }
+
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == ':') {
+        p++;
+    }
+    if (*p != '"') {
+        return false;
+    }
+    p++;
+
+    size_t i = 0;
+    while (*p != '\0' && *p != '"' && i < out_len - 1) {
+        out[i++] = *p++;
+    }
+    out[i] = '\0';
+    return i > 0;
+}
+
+static bool bin_name_valid(const char *name)
+{
+    if (name == NULL || name[0] == '\0') {
+        return false;
+    }
+    if (strchr(name, '/') != NULL || strchr(name, '\\') != NULL) {
+        return false;
+    }
+    if (strstr(name, "..") != NULL) {
+        return false;
+    }
+    return true;
+}
+
+static bool http_get_body(const char *url, char *body, size_t body_len)
+{
     esp_http_client_config_t cfg = {
         .url = url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -103,25 +129,51 @@ static bool fetch_latest_version(void)
     if (esp_http_client_open(client, 0) == ESP_OK) {
         int total = esp_http_client_fetch_headers(client);
         if (total < 0) {
-            total = (int)sizeof(body) - 1;
+            total = (int)body_len - 1;
         }
-        if (total > (int)sizeof(body) - 1) {
-            total = (int)sizeof(body) - 1;
+        if (total > (int)body_len - 1) {
+            total = (int)body_len - 1;
         }
         int read = esp_http_client_read(client, body, total);
         if (read > 0) {
             body[read] = '\0';
-            trim_version_text(body, sizeof(body));
-            if (body[0] != '\0') {
-                strncpy(s_latest_version, body, sizeof(s_latest_version) - 1);
-                s_latest_version[sizeof(s_latest_version) - 1] = '\0';
-                s_update_available = version_is_newer(s_latest_version, CURRENT_FW_VERSION);
-                ok = true;
-            }
+            ok = true;
         }
     }
     esp_http_client_cleanup(client);
     return ok;
+}
+
+static bool fetch_latest_manifest(void)
+{
+    char base[96];
+    if (remote_build_ota_url(base, sizeof(base)) == 0) {
+        return false;
+    }
+
+    char url[128];
+    snprintf(url, sizeof(url), "%s/latest.json", base);
+
+    char body[256] = {0};
+    if (!http_get_body(url, body, sizeof(body))) {
+        return false;
+    }
+
+    char version[16] = {0};
+    char bin[64] = {0};
+    if (!json_extract_string(body, "version", version, sizeof(version))) {
+        return false;
+    }
+    if (!json_extract_string(body, "bin", bin, sizeof(bin)) || !bin_name_valid(bin)) {
+        return false;
+    }
+
+    strncpy(s_latest_version, version, sizeof(s_latest_version) - 1);
+    s_latest_version[sizeof(s_latest_version) - 1] = '\0';
+    strncpy(s_latest_bin, bin, sizeof(s_latest_bin) - 1);
+    s_latest_bin[sizeof(s_latest_bin) - 1] = '\0';
+    s_update_available = version_is_newer(s_latest_version, CURRENT_FW_VERSION);
+    return true;
 }
 
 static void version_check_task(void *arg)
@@ -130,8 +182,9 @@ static void version_check_task(void *arg)
 
     set_status(OTA_STATE_CHECKING, "Verific versiune...");
 
-    if (!fetch_latest_version()) {
+    if (!fetch_latest_manifest()) {
         snprintf(s_latest_version, sizeof(s_latest_version), "--");
+        s_latest_bin[0] = '\0';
         s_update_available = false;
         set_status(OTA_STATE_IDLE, "Verificare esuata");
     } else if (s_update_available) {
@@ -148,15 +201,33 @@ static void ota_task(void *arg)
 {
     (void) arg;
 
-    char url[96];
-    if (remote_build_ota_url(url, sizeof(url)) == 0) {
+    if (s_latest_bin[0] == '\0' && !fetch_latest_manifest()) {
+        set_status(OTA_STATE_FAILED, "Manifest invalid");
+        s_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    if (!s_update_available) {
+        set_status(OTA_STATE_FAILED, "Deja la zi");
+        s_task = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    char base[96];
+    if (remote_build_ota_url(base, sizeof(base)) == 0) {
         set_status(OTA_STATE_FAILED, "Config invalida");
         s_task = NULL;
         vTaskDelete(NULL);
         return;
     }
 
+    char url[160];
+    snprintf(url, sizeof(url), "%s/%s", base, s_latest_bin);
+
     set_status(OTA_STATE_CHECKING, "Pornesc update...");
+    ESP_LOGI(TAG, "Descarc %s", url);
 
     esp_http_client_config_t http_cfg = {
         .url = url,

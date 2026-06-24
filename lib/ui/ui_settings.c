@@ -10,6 +10,7 @@
 #include "wifi_manager.h"
 #include "rgb_led.h"
 #include "settings_store.h"
+#include "mqtt_comm.h"
 #include "ota_update.h"
 
 #include "esp_system.h"
@@ -24,6 +25,7 @@
 
 typedef struct {
     lv_obj_t   *wifi_lbl;
+    lv_obj_t   *mqtt_name_lbl;
     lv_obj_t   *heap_lbl;
     lv_obj_t   *uptime_lbl;
     lv_obj_t   *fw_lbl;
@@ -37,6 +39,31 @@ static wifi_scan_entry_t s_scan[WIFI_SCAN_MAX];
 static uint8_t s_scan_n = 0;
 static char s_sel_ssid[33];
 static lv_obj_t *s_scan_modal = NULL;
+
+/* ---- Nume utilizator ---- */
+
+static void mqtt_name_done_cb(const char *text, void *user)
+{
+    settings_ui_t *ui = (settings_ui_t *)user;
+    settings_set_mqtt_name(text);
+    mqtt_comm_reconnect();
+    if (ui != NULL && ui->mqtt_name_lbl != NULL) {
+        char name[MQTT_DEVICE_NAME_LEN] = "";
+        if (settings_get_mqtt_name(name, sizeof(name))) {
+            lv_label_set_text_fmt(ui->mqtt_name_lbl, "Nume: %s", name);
+        } else {
+            lv_label_set_text(ui->mqtt_name_lbl, "Nume: (nesetat)");
+        }
+    }
+}
+
+static void mqtt_name_btn_cb(lv_event_t *e)
+{
+    settings_ui_t *ui = (settings_ui_t *)lv_event_get_user_data(e);
+    char current[MQTT_DEVICE_NAME_LEN] = "";
+    settings_get_mqtt_name(current, sizeof(current));
+    ui_keyboard_show("Nume pe retea", current, mqtt_name_done_cb, ui);
+}
 
 static void password_done_cb(const char *text, void *user)
 {
@@ -279,17 +306,28 @@ static void update_cb(lv_timer_t *timer)
 {
     settings_ui_t *ui = (settings_ui_t *)timer->user_data;
 
-    char ssid[33];
-    char ip[16];
-    wifi_get_ssid(ssid, sizeof(ssid));
-    wifi_get_ip_string(ip, sizeof(ip));
-    if (wifi_is_connected()) {
-        lv_label_set_text_fmt(ui->wifi_lbl, "WiFi: %s\nIP: %s  Semnal: %u%%",
-                              ssid, ip, wifi_get_strength());
-    } else if (wifi_has_saved()) {
-        lv_label_set_text_fmt(ui->wifi_lbl, "WiFi: deconectat\nRetea salvata: %s", ssid);
-    } else {
-        lv_label_set_text(ui->wifi_lbl, "WiFi: deconectat\nNicio retea salvata");
+    if (ui->wifi_lbl) {
+        char ssid[33];
+        char ip[16];
+        wifi_get_ssid(ssid, sizeof(ssid));
+        wifi_get_ip_string(ip, sizeof(ip));
+        if (wifi_is_connected()) {
+            lv_label_set_text_fmt(ui->wifi_lbl, "WiFi: %s\nIP: %s  Semnal: %u%%",
+                                  ssid, ip, wifi_get_strength());
+        } else if (wifi_has_saved()) {
+            lv_label_set_text_fmt(ui->wifi_lbl, "WiFi: deconectat\nRetea salvata: %s", ssid);
+        } else {
+            lv_label_set_text(ui->wifi_lbl, "WiFi: deconectat\nNicio retea salvata");
+        }
+    }
+
+    if (ui->mqtt_name_lbl) {
+        char name[MQTT_DEVICE_NAME_LEN] = "";
+        if (settings_get_mqtt_name(name, sizeof(name))) {
+            lv_label_set_text_fmt(ui->mqtt_name_lbl, "Nume: %s", name);
+        } else {
+            lv_label_set_text(ui->mqtt_name_lbl, "Nume: (nesetat)");
+        }
     }
 
     lv_label_set_text_fmt(ui->heap_lbl, "Heap liber: %u KB",
@@ -364,6 +402,16 @@ lv_obj_t *ui_settings_create(void)
     lv_obj_t *led_btn_lbl = lv_label_create(led_btn);
     lv_label_set_text(led_btn_lbl, LV_SYMBOL_TINT " Culoare LED");
     lv_obj_center(led_btn_lbl);
+
+    section_title(content, "Numele Utilizatorului");
+    ui->mqtt_name_lbl = lv_label_create(content);
+    lv_label_set_text(ui->mqtt_name_lbl, "Nume: (nesetat)");
+    lv_obj_t *mqtt_name_btn = lv_btn_create(content);
+    lv_obj_set_width(mqtt_name_btn, LV_PCT(100));
+    lv_obj_add_event_cb(mqtt_name_btn, mqtt_name_btn_cb, LV_EVENT_CLICKED, ui);
+    lv_obj_t *mqtt_name_btn_lbl = lv_label_create(mqtt_name_btn);
+    lv_label_set_text(mqtt_name_btn_lbl, LV_SYMBOL_EDIT " Seteaza numele");
+    lv_obj_center(mqtt_name_btn_lbl);
 
     section_title(content, "WiFi");
     ui->wifi_lbl = lv_label_create(content);

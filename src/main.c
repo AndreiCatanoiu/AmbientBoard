@@ -12,6 +12,7 @@
 #include "time_manager.h"
 #include "senzor_temperatura.h"
 #include "mqtt_comm.h"
+#include "inbox.h"
 #include "ota_update.h"
 
 void app_main(void)
@@ -30,12 +31,13 @@ void app_main(void)
     time_init();
     temp_sensor_init();
     mqtt_comm_init();
+    inbox_init();
     ota_update_init();
 
     xTaskCreate(&display_task, "display_task", 12288, NULL, 4, NULL);
     xTaskCreate(&wifi_task, "wifi_task", 4096, NULL, 5, NULL);
     xTaskCreate(&time_task, "time_task", 4096, NULL, 5, NULL);
-    xTaskCreate(&temp_sensor_task, "temp_sensor_task", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(&temp_sensor_task, "temp_sensor_task", 4096, NULL, 5, NULL, 1);
 
     ESP_LOGI("APP_MAIN", "AmbientBoard pornit");
 }
